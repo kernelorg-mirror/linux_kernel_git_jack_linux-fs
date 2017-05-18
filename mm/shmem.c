@@ -783,26 +783,25 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 	pagevec_init(&pvec, 0);
 	index = start;
 	while (index < end) {
-		if (!pagevec_lookup_entries(&pvec, mapping, index,
+		if (!pagevec_lookup_entries(&pvec, mapping, &index,
 				min(end - index, (pgoff_t)PAGEVEC_SIZE),
 				indices))
 			break;
 		for (i = 0; i < pagevec_count(&pvec); i++) {
 			struct page *page = pvec.pages[i];
 
-			index = indices[i];
-			if (index >= end)
+			if (indices[i] >= end)
 				break;
 
 			if (radix_tree_exceptional_entry(page)) {
 				if (unfalloc)
 					continue;
 				nr_swaps_freed += !shmem_free_swap(mapping,
-								index, page);
+							indices[i], page);
 				continue;
 			}
 
-			VM_BUG_ON_PAGE(page_to_pgoff(page) != index, page);
+			VM_BUG_ON_PAGE(page_to_pgoff(page) != indices[i], page);
 
 			if (!trylock_page(page))
 				continue;
@@ -813,7 +812,8 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 				unlock_page(page);
 				continue;
 			} else if (PageTransHuge(page)) {
-				if (index == round_down(end, HPAGE_PMD_NR)) {
+				if (indices[i] ==
+						round_down(end, HPAGE_PMD_NR)) {
 					/*
 					 * Range ends in the middle of THP:
 					 * zero out the page
@@ -822,7 +822,8 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 					unlock_page(page);
 					continue;
 				}
-				index += HPAGE_PMD_NR - 1;
+				if (indices[i] + HPAGE_PMD_NR > index)
+					index = indices[i] + HPAGE_PMD_NR;
 				i += HPAGE_PMD_NR - 1;
 			}
 
@@ -838,7 +839,6 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 		pagevec_remove_exceptionals(&pvec);
 		pagevec_release(&pvec);
 		cond_resched();
-		index++;
 	}
 
 	if (partial_start) {
@@ -871,13 +871,15 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 
 	index = start;
 	while (index < end) {
+		pgoff_t lookup_start = index;
+
 		cond_resched();
 
-		if (!pagevec_lookup_entries(&pvec, mapping, index,
+		if (!pagevec_lookup_entries(&pvec, mapping, &index,
 				min(end - index, (pgoff_t)PAGEVEC_SIZE),
 				indices)) {
 			/* If all gone or hole-punch or unfalloc, we're done */
-			if (index == start || end != -1)
+			if (lookup_start == start || end != -1)
 				break;
 			/* But if truncating, restart to make sure all gone */
 			index = start;
@@ -886,16 +888,16 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 		for (i = 0; i < pagevec_count(&pvec); i++) {
 			struct page *page = pvec.pages[i];
 
-			index = indices[i];
-			if (index >= end)
+			if (indices[i] >= end)
 				break;
 
 			if (radix_tree_exceptional_entry(page)) {
 				if (unfalloc)
 					continue;
-				if (shmem_free_swap(mapping, index, page)) {
+				if (shmem_free_swap(mapping, indices[i],
+						    page)) {
 					/* Swap was replaced by page: retry */
-					index--;
+					index = indices[i];
 					break;
 				}
 				nr_swaps_freed++;
@@ -913,11 +915,12 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 				 * of THP: don't need to look on these pages
 				 * again on !pvec.nr restart.
 				 */
-				if (index != round_down(end, HPAGE_PMD_NR))
+				if (indices[i] != round_down(end, HPAGE_PMD_NR))
 					start++;
 				continue;
 			} else if (PageTransHuge(page)) {
-				if (index == round_down(end, HPAGE_PMD_NR)) {
+				if (indices[i] ==
+						round_down(end, HPAGE_PMD_NR)) {
 					/*
 					 * Range ends in the middle of THP:
 					 * zero out the page
@@ -926,7 +929,8 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 					unlock_page(page);
 					continue;
 				}
-				index += HPAGE_PMD_NR - 1;
+				if (indices[i] + HPAGE_PMD_NR > index)
+					index = indices[i] + HPAGE_PMD_NR;
 				i += HPAGE_PMD_NR - 1;
 			}
 
@@ -938,7 +942,7 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 				} else {
 					/* Page was replaced by swap: retry */
 					unlock_page(page);
-					index--;
+					index = indices[i];
 					break;
 				}
 			}
@@ -946,7 +950,6 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 		}
 		pagevec_remove_exceptionals(&pvec);
 		pagevec_release(&pvec);
-		index++;
 	}
 
 	spin_lock_irq(&info->lock);
@@ -2515,31 +2518,33 @@ static pgoff_t shmem_seek_hole_data(struct address_space *mapping,
 	pgoff_t indices[PAGEVEC_SIZE];
 	bool done = false;
 	int i;
+	pgoff_t last;
 
 	pagevec_init(&pvec, 0);
 	pvec.nr = 1;		/* start small: we may be there already */
 	while (!done) {
-		pvec.nr = find_get_entries(mapping, index,
+		last = index;
+		pvec.nr = find_get_entries(mapping, &index,
 					pvec.nr, pvec.pages, indices);
 		if (!pvec.nr) {
 			if (whence == SEEK_DATA)
-				index = end;
+				last = end;
 			break;
 		}
-		for (i = 0; i < pvec.nr; i++, index++) {
-			if (index < indices[i]) {
+		for (i = 0; i < pvec.nr; i++, last++) {
+			if (last < indices[i]) {
 				if (whence == SEEK_HOLE) {
 					done = true;
 					break;
 				}
-				index = indices[i];
+				last = indices[i];
 			}
 			page = pvec.pages[i];
 			if (page && !radix_tree_exceptional_entry(page)) {
 				if (!PageUptodate(page))
 					page = NULL;
 			}
-			if (index >= end ||
+			if (last >= end ||
 			    (page && whence == SEEK_DATA) ||
 			    (!page && whence == SEEK_HOLE)) {
 				done = true;
@@ -2551,7 +2556,7 @@ static pgoff_t shmem_seek_hole_data(struct address_space *mapping,
 		pvec.nr = PAGEVEC_SIZE;
 		cond_resched();
 	}
-	return index;
+	return last;
 }
 
 static loff_t shmem_file_llseek(struct file *file, loff_t offset, int whence)
