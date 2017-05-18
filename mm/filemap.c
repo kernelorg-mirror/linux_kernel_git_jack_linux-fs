@@ -1876,7 +1876,7 @@ EXPORT_SYMBOL(find_get_pages_range_tag);
  * Like find_get_entries, except we only return entries which are tagged with
  * @tag.
  */
-unsigned find_get_entries_tag(struct address_space *mapping, pgoff_t start,
+unsigned find_get_entries_tag(struct address_space *mapping, pgoff_t *start,
 			int tag, unsigned int nr_entries,
 			struct page **entries, pgoff_t *indices)
 {
@@ -1889,7 +1889,7 @@ unsigned find_get_entries_tag(struct address_space *mapping, pgoff_t start,
 
 	rcu_read_lock();
 	radix_tree_for_each_tagged(slot, &mapping->page_tree,
-				   &iter, start, tag) {
+				   &iter, *start, tag) {
 		struct page *head, *page;
 repeat:
 		page = radix_tree_deref_slot(slot);
@@ -1931,6 +1931,10 @@ export:
 			break;
 	}
 	rcu_read_unlock();
+
+	if (ret)
+		*start = indices[ret - 1] + 1;
+
 	return ret;
 }
 EXPORT_SYMBOL(find_get_entries_tag);
