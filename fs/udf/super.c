@@ -2395,11 +2395,17 @@ static int udf_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct udf_sb_info *sbi = UDF_SB(sb);
 	struct logicalVolIntegrityDescImpUse *lvidiu;
 	u64 id = huge_encode_dev(sb->s_bdev->bd_dev);
+	unsigned int part = sbi->s_partition;
+	int ptype = sbi->s_partmaps[part].s_partition_type;
 
+	if (ptype == UDF_METADATA_MAP25) {
+		part = sbi->s_partmaps[part].s_type_specific.s_metadata.
+							s_phys_partition_ref;
+	}
 	lvidiu = udf_sb_lvidiu(sb);
 	buf->f_type = UDF_SUPER_MAGIC;
 	buf->f_bsize = sb->s_blocksize;
-	buf->f_blocks = sbi->s_partmaps[sbi->s_partition].s_partition_len;
+	buf->f_blocks = sbi->s_partmaps[part].s_partition_len;
 	buf->f_bfree = udf_count_free(sb);
 	buf->f_bavail = buf->f_bfree;
 	/*
